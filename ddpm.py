@@ -1,11 +1,12 @@
 import os
 import torch
 import torch.nn as nn
+import numpy as np
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 from torch import optim
 from utils import *
-from modules import UNet
+from modules import UNet, UNet_with_class
 import logging
 from torch.utils.tensorboard import SummaryWriter
 
@@ -43,14 +44,21 @@ class Diffusion:
     def sample_timestep(self, batchsize):
         return torch.randint(1, self.noise_step, (batchsize,)).to(self.device)
 
-    def sample(self, model, batchsize):
+    def sample(self, model, batchsize, labels, cfg_scale=3):
         logging.info(f"Sampling {batchsize} images...")
         with torch.no_grad():
             x = torch.randn(batchsize, 3, self.img_size, self.img_size).to(
                 self.device)  # sample from Gaussian
             for i in tqdm(reversed(range(1, self.noise_step)), position=0):
                 t = torch.tensor(i).long().repeat(batchsize).to(self.device)
-                predicted_noise = model(x, t)
+                predicted_noise = model(x, t, labels)
+
+                if cfg_scale > 0:
+                    # bilinear interpolation
+                    uncond_pred_noise = model(x, t, None)
+                    predicted_noise = torch.lerp(
+                        uncond_pred_noise, predicted_noise, cfg_scale)
+
                 alpha = self.alpha[t][:, None, None, None]
                 alpha_hat = self.alpha_hat[t][:, None, None, None]
                 beta = self.beta[t][:, None, None, None]
@@ -71,7 +79,8 @@ def train(args):
     setup_logging(args.run_name)
     device = args.device
     dataloader = get_data(args)
-    model = UNet().to(device)
+    # model = UNet().to(device)
+    model = UNet_with_class(num_classes=args.num_classes).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     mse = nn.MSELoss()
     diffusion = Diffusion(img_size=args.image_size, device=device)
@@ -80,27 +89,33 @@ def train(args):
 
     for epoch in range(args.epochs):
         logging.info(f"Epoch {epoch+1}/{args.epochs}")
-        pbar = tqdm(dataloader)
-        for i, (images, _) in enumerate(pbar):
+        pbar = tqdm(dataloader, dynamic_ncols=True, position=0)
+        for i, (images, labels) in enumerate(pbar):
             images = images.to(device)
+            labels = labels.to(device)
             t = diffusion.sample_timestep(images.shape[0]).to(device)
             x_t, noise = diffusion.noisy_images(images, t)
-            predicted_noise = model(x_t, t)
+
+            if np.random.rand() < 0.1:
+                labels = None
+
+            # predicted_noise = model(x_t, t)
+            predicted_noise = model(x_t, t, labels)
             loss = mse(predicted_noise, noise)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            pbar.set_prefix(MSE=loss.item())
+            pbar.set_postfix(MSE=loss.item())
             logger.add_scalar("MSE", loss.item(), epoch * l + i)
 
-        # for each epoch, we try to sample 12 images to see how the model is doing
-        sampled_images = diffusion.sample(model, images.shape[0])
-        save_images(sampled_images, os.path.join(
-            "results", args.run_name, f"epoch_{epoch+1}.jpg"))
-        torch.save(model.state_dict(), os.path.join(
-            "checkpoints", args.run_name, f"epoch_{epoch+1}.pt"))
+        if epoch % 10 == 0:
+            sampled_images = diffusion.sample(model, images.shape[0])
+            save_images(sampled_images, os.path.join(
+                "results", args.run_name, f"epoch_{epoch+1}.jpg"))
+            torch.save(model.state_dict(), os.path.join(
+                "checkpoints", args.run_name, f"epoch_{epoch+1}.pt"))
 
 
 def launch():
@@ -108,10 +123,11 @@ def launch():
     parser = argparse.ArgumentParser()
     args = parser.parse_args()
     args.run_name = "DDPM_Uncondtional"
-    args.epochs = 500
-    args.batch_size = 12
+    args.epochs = 2
+    args.batch_size = 3
     args.image_size = 64
-    args.dataset_path = r"~/~/~/~"
+    args.num_classes = 10  # cifar10
+    args.dataset_path = r"../Dataset"
     args.device = "cpu"
     args.lr = 3e-4
     train(args)
