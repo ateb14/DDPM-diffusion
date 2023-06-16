@@ -86,7 +86,7 @@ class DoubleConv(nn.Module):
 
 
 class DownSample(nn.Module):
-    '''Downsample => DoubleConv => DoubleConv => positional embedding'''
+    '''Downsample(maxpooling) => DoubleConv => DoubleConv => positional embedding'''
 
     def __init__(self, in_channels, out_channels, embedding_dim=256):
         super(DownSample, self).__init__()

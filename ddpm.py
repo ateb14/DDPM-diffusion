@@ -7,7 +7,8 @@ from utils import *
 from modules import UNet, UNet_with_class, EMA
 import logging
 import copy
-# from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s: %(message)s",
                     level=logging.INFO, datefmt="%I:%M:%S")
@@ -48,7 +49,7 @@ class Diffusion:
         with torch.no_grad():
             x = torch.randn(batchsize, 3, self.img_size, self.img_size).to(
                 self.device)  # sample from Gaussian
-            for i in reversed(range(1, self.noise_step)):
+            for i in tqdm(reversed(range(1, self.noise_step)), position=0, total=self.noise_step-1):
                 t = torch.tensor(i).long().repeat(batchsize).to(self.device)
                 predicted_noise = model(x, t, labels)
 
@@ -87,13 +88,13 @@ def train(args):
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
     mse = nn.MSELoss()
     diffusion = Diffusion(img_size=args.image_size, device=device)
-    # logger = SummaryWriter(os.path.join("runs", args.run_name))
+    logger = SummaryWriter(os.path.join("runs", args.run_name))
     l = len(dataloader)
 
     for epoch in range(args.epochs):
         logging.info(f"Epoch {epoch+1}/{args.epochs}")
-        # pbar = tqdm(dataloader)
-        for i, (images, labels) in enumerate(dataloader):
+        pbar = tqdm(dataloader)
+        for i, (images, labels) in enumerate(pbar):
             images = images.to(device)
             labels = labels.to(device)
             t = diffusion.sample_timestep(images.shape[0]).to(device)
@@ -111,10 +112,10 @@ def train(args):
             optimizer.step()
             ema.step_ema(ema_model, model)
 
-            # pbar.set_postfix(MSE=loss.item())
-            if i % 64 == 0 or i == l-1:
-                logging.info(f"MSE {loss.item()}, epoch {epoch + 1}, iteration {i}")
-            # logger.add_scalar("MSE", loss.item(), epoch * l + i)
+            pbar.set_postfix(MSE=loss.item())
+            # if i % 64 == 0 or i == l-1:
+            #     logging.info(f"MSE {loss.item()}, epoch {epoch + 1}, iteration {i}")
+            logger.add_scalar("MSE", loss.item(), epoch * l + i)
 
         if epoch % 10 == 0:
             logging.info(f"Epoch {epoch + 1}, saving checkpoint...")
@@ -148,7 +149,7 @@ def launch():
     args.batch_size = 160
     args.image_size = 64
     args.num_classes = 10  # cifar10
-    args.dataset_path = r"./cifar10png/train"
+    args.dataset_path = r"../cifar10png/train"
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args.lr = 3e-4
     if torch.cuda.is_available():
