@@ -3,6 +3,34 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class EMA:
+    def __init__(self, beta):
+        super().__init__()
+        self.beta = beta
+        self.step = 0
+
+    def update_average(self, old, new):
+        if old is None: 
+            return new
+        return old * self.beta + (1-self.beta) * new
+    
+    def update_model_average(self, ema_model, current_model):
+        current_model = current_model.module # get the model module from DataParallel
+            
+        for current_params, ema_params in zip(current_model.parameters(), ema_model.parameters()):
+            old_weight, cur_weight = ema_params.data, current_params.data
+            ema_params.data = self.update_average(old_weight, cur_weight)
+
+    def reset_params(self, ema_model, current_model):
+        ema_model.load_state_dict(current_model.state_dict())
+
+    def step_ema(self, ema_model, model, step_start_ema=2000):
+        if self.step < step_start_ema: # warmup
+            self.reset_params(ema_model, model)
+        else:
+            self.update_model_average(ema_model, model)
+        self.step += 1
+
 class SelfAttention(nn.Module):
     '''Attention block from transformer, but with a feed forward layer at the end'''
 

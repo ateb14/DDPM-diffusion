@@ -2,13 +2,12 @@ import os
 import torch
 import torch.nn as nn
 import numpy as np
-from matplotlib import pyplot as plt
-from tqdm import tqdm
 from torch import optim
 from utils import *
-from modules import UNet, UNet_with_class
+from modules import UNet, UNet_with_class, EMA
 import logging
-from torch.utils.tensorboard import SummaryWriter
+import copy
+# from torch.utils.tensorboard import SummaryWriter
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s: %(message)s",
                     level=logging.INFO, datefmt="%I:%M:%S")
@@ -49,7 +48,7 @@ class Diffusion:
         with torch.no_grad():
             x = torch.randn(batchsize, 3, self.img_size, self.img_size).to(
                 self.device)  # sample from Gaussian
-            for i in tqdm(reversed(range(1, self.noise_step)), position=0):
+            for i in reversed(range(1, self.noise_step)):
                 t = torch.tensor(i).long().repeat(batchsize).to(self.device)
                 predicted_noise = model(x, t, labels)
 
@@ -80,17 +79,21 @@ def train(args):
     device = args.device
     dataloader = get_data(args)
     # model = UNet().to(device)
-    model = UNet_with_class(num_classes=args.num_classes).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    model = UNet_with_class(num_classes=args.num_classes, device=device)
+    model = nn.DataParallel(model, device_ids=[0,1,2,3]).cuda()
+    ema = EMA(0.995)
+    ema_model = copy.deepcopy(model).eval().requires_grad_(False)
+
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
     mse = nn.MSELoss()
     diffusion = Diffusion(img_size=args.image_size, device=device)
-    logger = SummaryWriter(os.path.join("runs", args.run_name))
+    # logger = SummaryWriter(os.path.join("runs", args.run_name))
     l = len(dataloader)
 
     for epoch in range(args.epochs):
         logging.info(f"Epoch {epoch+1}/{args.epochs}")
-        pbar = tqdm(dataloader, dynamic_ncols=True, position=0)
-        for i, (images, labels) in enumerate(pbar):
+        # pbar = tqdm(dataloader)
+        for i, (images, labels) in enumerate(dataloader):
             images = images.to(device)
             labels = labels.to(device)
             t = diffusion.sample_timestep(images.shape[0]).to(device)
@@ -106,30 +109,57 @@ def train(args):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            ema.step_ema(ema_model, model)
 
-            pbar.set_postfix(MSE=loss.item())
-            logger.add_scalar("MSE", loss.item(), epoch * l + i)
+            # pbar.set_postfix(MSE=loss.item())
+            if i % 64 == 0 or i == l-1:
+                logging.info(f"MSE {loss.item()}, epoch {epoch + 1}, iteration {i}")
+            # logger.add_scalar("MSE", loss.item(), epoch * l + i)
 
         if epoch % 10 == 0:
-            sampled_images = diffusion.sample(model, images.shape[0])
+            logging.info(f"Epoch {epoch + 1}, saving checkpoint...")
+            labels = torch.arange(10).long().to(device)
+            sampled_images = diffusion.sample(model, batchsize=len(labels), labels=labels)
+            ema_sampled_images = diffusion.sample(ema_model, batchsize=len(labels), labels=labels)
+            # plot_images(sampled_images)
             save_images(sampled_images, os.path.join(
                 "results", args.run_name, f"epoch_{epoch+1}.jpg"))
-            torch.save(model.state_dict(), os.path.join(
-                "checkpoints", args.run_name, f"epoch_{epoch+1}.pt"))
+            save_images(ema_sampled_images, os.path.join(
+                "results", args.run_name, f"epoch_{epoch+1}_ema.jpg"))
+            
+            if isinstance(model, nn.DataParallel):
+                torch.save(model.module.state_dict(), os.path.join(
+                    "models", args.run_name, f"epoch_{epoch+1}.pt"))
+                torch.save(ema_model.module.state_dict(), os.path.join("models", args.run_name, f"epoch_{epoch+1}_ema.pt"))
+            else:
+                torch.save(model.state_dict(), os.path.join(
+                    "models", args.run_name, f"epoch_{epoch+1}.pt"))
+                torch.save(ema_model.state_dict(), os.path.join("models", args.run_name, f"epoch_{epoch+1}_ema.pt"))
+
+            torch.save(optimizer.state_dict(), os.path.join("models", args.run_name, f"optim.pt"))
 
 
 def launch():
     import argparse
     parser = argparse.ArgumentParser()
     args = parser.parse_args()
-    args.run_name = "DDPM_Uncondtional"
-    args.epochs = 2
-    args.batch_size = 3
+    args.run_name = "DDPM_condtional"
+    args.epochs = 300
+    args.batch_size = 160
     args.image_size = 64
     args.num_classes = 10  # cifar10
-    args.dataset_path = r"../Dataset"
-    args.device = "cpu"
+    args.dataset_path = r"./cifar10png/train"
+    args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args.lr = 3e-4
+    if torch.cuda.is_available():
+        print("CUDA enabled!")
+        gpu_cnt = torch.cuda.device_count()
+        print(gpu_cnt, 'gpus are working, which are:')
+        for i in range(gpu_cnt):
+            print('  ', torch.cuda.get_device_name(i))
+    else:
+        print("Turtle speed cpu")
+
     train(args)
 
 
